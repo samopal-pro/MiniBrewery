@@ -55,6 +55,7 @@
 enum PID_TYPE {
   PT_NONE  = -1,
   PT_OFF   = 0,
+  PT_PAUSE   = 1000,
   PT_T0    = 1,
   PT_T1    = 2,
   PT_TC0   = 11, // Режим охлаждения
@@ -63,6 +64,8 @@ enum PID_TYPE {
 // в tempPID записываентся процент нагрева 0-100  
   PT_POW0   = 21, // Отображается T1
   PT_POW1   = 22, // Отображается T2
+// Слив пока датчик потока true
+  PT_DRAIN  = 30,  
 };
 
 extern uint16_t tunerPID1, tunerPID2,tunerPID5;
@@ -73,6 +76,7 @@ struct stageOfBrewing {
    float T;        // Температура
    bool OUT0, OUT1, OUT2, OUT3, MOTOR;
    uint8_t SERVO;  
+   bool CHECKDP;
 };
 
 
@@ -118,5 +122,5 @@ void displayIP();
 //void displayPID();
 void semaphorePrint( char *s, bool ln = true);
 uint32_t pidCalcWindow( float t_cur, float t_pid, uint32_t max_window );
-
+void controlPause();
 #endif

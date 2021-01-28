@@ -5,6 +5,8 @@
 #include <esp_wifi.h>
 #include "STask.h"
 
+const char *_SVERSION = PSTR("NANOBREWERY v1.0.2"); 
+
 //#include "src/GyverPID.h"
 Adafruit_ILI9341 display = Adafruit_ILI9341(TFT_CS, TFT_DC, TFT_RST);
 
@@ -33,7 +35,7 @@ void statusCallback( WM_STATUS stat );
 void setup() {
    delay(2000);
    Serial.begin(115200);
-   Serial.println(F("NANOBREWERY v1.0"));
+   Serial.println(_SVERSION);
    uint8_t mac[10];
 // Инициализация файловой системы на внутренней памяти
    eepromBegin();
@@ -92,7 +94,7 @@ void setup() {
    display.setTextColor(ILI9341_YELLOW);
    display.setTextSize(3);
    display.setCursor(20,2);
-   display.print(F("NANOBREWERY v1.1"));
+   display.print(_SVERSION);
   
 // Инициализация WiFi
 //   wifiManager.resetSettings();

@@ -13,18 +13,23 @@ SOutput Out3(PIN_OUT3);
 SOutput Heater(PIN_TRIAC0);
 SOutput Motor(PIN_TRIAC1);
 //SOutput Bizzer(PIN_BIZZER);
-bool DP1    = false;
-float TT1   = 0;
-bool isMQTT = false;
-bool isAP   = false;
-bool isAUTO = false;
+bool DP1     = false;
+float TT1    = 0;
+bool isMQTT  = false;
+bool isAP    = false;
+bool isAUTO  = false;
+bool isAlarm = false;
+bool isPause = false;
+bool isCheckDP = false;
+uint32_t msCheckDP = 0;
 PID_TYPE isPID  = PT_OFF, isPID_save = PT_NONE;
 // PID регулятор
 float tempPID;
 float proc,_temp;
 uint32_t timePID = 600;
 int PID_WINDOW = 2000;
-uint32_t ms_pid =0, ms_start=0;
+uint32_t ms_pid =0, ms_start=0, ms_pause = 0;
+struct stageOfBrewing *stade;
 
 uint16_t tunerPID1 = 60;
 uint16_t tunerPID2 = 75;
@@ -111,7 +116,7 @@ void taskGetSensors( void *pvParameters ){
    analogSetCycles(255);
    SInputNTC ntc0(PIN_INP0,10000,4092,0,1.024);
    SInputNTC ntc1(PIN_INP1,10000,4092,0,1.024);
-   
+   SFlowSensor flow0(2200,10,3,7);
 // Определение NTC сенсоров
 //   Thermistor ntc0(PIN_INP0,10000,100000,25,3950,4095);
    
@@ -122,8 +127,25 @@ void taskGetSensors( void *pvParameters ){
       DT1 = ntc1.GetTemperature();
       uint16_t a2 = analogRead(PIN_INP2);
       uint16_t a3 = analogRead(PIN_INP3);
-      if( a2 < 1700 )DP1 =true;
-      else DP1 = false;
+      uint8_t _flow0 = flow0.Set(a2);
+      if( _flow0 != 255 )DP1 = (bool)_flow0;
+      if( isCheckDP ){
+         if( millis() - msCheckDP > 10000 ){
+            if( DP1 == false  ){
+               msCheckDP = millis();
+               isAlarm = true;
+               
+               bizzer.SetBlinkMode(0B10101010); 
+               Serial.println("Flow Sensor Alarm ON");
+            }
+            else {
+               msCheckDP = millis();
+               isAlarm = false;
+               bizzer.SetBlinkMode(0B00000000); 
+              Serial.println("Flow Sensor Alarm OFF");
+            }
+         }
+      }
       if( xSemaphoreTake( lcdSemaphore, portMAX_DELAY ) ){
          display.fillRect(0,90,320,22,ILI9341_BLACK);      
          display.setTextColor(ILI9341_RED);
@@ -237,6 +259,13 @@ void taskButtons( void *pvParameters ){
       switch( ret&0x0f ){
          case SB_CLICK :
             Serial.printf("BTN 0x%x click\n",ret&0xf0);
+            if( isAlarm ){
+               msCheckDP = millis();
+               isAlarm = false;
+               bizzer.SetBlinkMode(0B00000000); 
+               Serial.println("Flow Sensor Alarm OFF");
+            }
+            controlPause();
             break;
          case SB_MULTI_CLICK :
             if( (ret&0xf0) == 0x30 && btn2.Count == 2 ){
@@ -297,19 +326,27 @@ void taskPID( void *pvParameters ){
                  bizzer.Off(); 
                  Heater.Set(false);                 
              }
+             if( isPID == PT_PAUSE ){
+                 display.print("PAUSE");
+                 display.fillRect(0,150,320,22,ILI9341_BLACK);
+                 pidMode = "OFF";
+                 bizzer.SeriesBlink(2,100); 
+                 Heater.Set(false);                 
+             }
              else if( isnan(temp) || temp < 0 || temp > 110 ){
                  display.print("HEAT:ERROR");   
                  pidMode = "ERROR";
-                isPID = PT_OFF;               
+                 isPID = PT_OFF;               
              }
              else {
                  switch( isPID ){
-                     case PT_T0:   pidMode = "HEAT:T1"; break; 
-                     case PT_T1:   pidMode = "HEAT:T2"; break; 
-                     case PT_TC0:  pidMode = "COOL:T1"; break; 
-                     case PT_TC1:  pidMode = "COOL:T2"; break; 
-                     case PT_POW0: pidMode = "POW:T1 "; break; 
-                     case PT_POW1: pidMode = "POW:T2";  break; 
+                     case PT_T0:    pidMode = "HEAT:T1"; break; 
+                     case PT_T1:    pidMode = "HEAT:T2"; break; 
+                     case PT_TC0:   pidMode = "COOL:T1"; break; 
+                     case PT_TC1:   pidMode = "COOL:T2"; break; 
+                     case PT_POW0:  pidMode = "POW:T1 "; break; 
+                     case PT_POW1:  pidMode = "POW:T2";  break; 
+                     case PT_DRAIN: pidMode = "DRAIN";   break; 
                 }
                 display.print(pidMode);
                 display.setCursor(160,120);
@@ -324,11 +361,16 @@ void taskPID( void *pvParameters ){
           }
        } //end if(isPID != isPID_save)
 // Нсли PID включен       
-       if( isPID != PT_OFF ){
+       if( isPID != PT_OFF && isPID != PT_PAUSE ){
 // Определяем размер окон работы симистора          
           uint32_t ON_WINDOW=0, OFF_WINDOW=PID_WINDOW; 
+          if( isPID == PT_DRAIN ){
+             OFF_WINDOW  = PID_WINDOW;
+             ON_WINDOW = 0;               
+             if( DP1 == false )ms_pid = millis(); 
+          }
 // Режим охлаждения до температуры          
-          if( isPID == PT_TC0 || isPID == PT_TC1 ){
+          else if( isPID == PT_TC0 || isPID == PT_TC1 ){
              OFF_WINDOW  = PID_WINDOW;
              ON_WINDOW = 0;               
              if(  temp - tempPID  <= 0.5 && ms_pid == 0 )ms_pid = millis(); 
@@ -391,7 +433,7 @@ void taskPID( void *pvParameters ){
              display.print(s);
              display.setCursor(160,150);
              if( ms_pid > 0 ){
-                t=(millis()-ms_pid)/1000;
+                t=(millis()-ms_pid)/1000+ms_pause;
                 sprintf(s,"%02d:%02d",(int)(t/60),(int)(t%60));
                 display.print(s);            
                 Serial.printf(" %s",s);
@@ -593,22 +635,30 @@ void taskServo( void *pvParameters ){
 
 void taskPivo( void *pvParameters ){
 struct stageOfBrewing Brewing[] = {
-  {1,   PT_T1,50.0,false,true,false,false,true,0},    //Доводим температуру до 50
-  {1200,PT_T0,55.0,true,false,false,false,true,0},      //55C 20мин
-  {4500,PT_T0,65.0,true,false,false,false,true,0},      //65C 75мин
-  {1800,PT_T0,73.0,true,false,false,false,true,0},      //73C 30мин
-  {300, PT_T0,78.0,true,false,false,false,true,0},      //78C 5мин
-  {300, PT_T1,100.0,false,false,false,false,false,0},   //Кипячение 100С 5мин
-  {2400,PT_POW1,50.0,false,false,false,false,false,1},  //Сброс хмеля 1 и 40 мин 50%
-  {1,   PT_POW1,50.0,false,false,false,false,false,2},  //Сброс хмеля 2
-  {900, PT_POW1,50.0,false,false,false,false,false,3},  //Сброс хмеля 3 и 15 мин 50%
-  {1,   PT_TC1,28,false,true,false,true,true,0},        //Охлаждение до 28
-  {0,   PT_OFF,0,false,false,false,false,false,0}       //Отключение всего
+  
+  {1,   PT_T1,50.0,false,true,false,false,true,0,true},    //Доводим температуру до 50
+  {1200,PT_T0,55.0,true,false,false,false,true,0,true},      //55C 20мин
+  {4500,PT_T0,65.0,true,false,false,false,true,0,true},      //65C 75мин
+  {1800,PT_T0,73.0,true,false,false,false,true,0,true},      //73C 30мин
+  {300, PT_T0,78.0,true,false,false,false,true,0,true},      //78C 5мин
+  {300, PT_T1,100.0,false,false,false,false,false,0,false},   //Кипячение 100С 5мин
+  {60,  PT_POW1,1.0,false,false,false,false,false,1,false},  //Сброс хмеля 1 и 40 мин 50%
+  {2340,PT_POW1,50.0,false,false,false,false,false,1,false},  //Сброс хмеля 1 и 40 мин 50%
+  {15,  PT_POW1,50.0,false,false,false,false,false,2,false},  //Сброс хмеля 2
+  {900, PT_POW1,50.0,false,false,false,false,false,3,false},  //Сброс хмеля 3 и 15  мин 50%
+  {1,   PT_TC1,28,false,true,false,true,true,0,false},        //Охлаждение до 28
+//  {60,   PT_TC1,45,false,true,false,true,true,0,false},        //Охлаждение до 28
+  {1,   PT_DRAIN,0,false,false,true,true,true,0,false},       //слив
+  {0,   PT_OFF,0,false,false,false,false,false,0,false}       //Отключение всего
 };
   isAUTO = true;
   uint8_t ret;
   for( int i=0;true;i++){
+     stade = &Brewing[i]; 
      Serial.printf("Step #%d %d\n",i, (int)Brewing[i].T);
+     isCheckDP = Brewing[i].CHECKDP;
+     msCheckDP = millis();
+     isAlarm   = false;
      timePID = Brewing[i].TIMER;
      tempPID = Brewing[i].T;
      isPID   = Brewing[i].PID;     
@@ -655,4 +705,27 @@ uint32_t pidCalcWindow( float t_cur, float t_pid, uint32_t max_window ){
    float tune = tune_min + ( tune_max - tune_min )*kt;
    uint32_t win = (uint32_t )( (float)max_window * tune );
    return win;
+}
+
+/**
+ * Включить/выключить паузу
+ */
+void controlPause(){
+   if( !isAUTO )return;
+   if( isPause == false ){
+      isPause = true;
+      Motor.Set(false);
+      Heater.Set(false);
+      isPID   = PT_PAUSE; 
+      ms_pause += (millis()-ms_pid)/1000;
+      timePID -= ms_pause;
+      Serial.println("Pause is ON");
+   }
+   else{
+      isPause = false;
+      Motor.Set(stade->MOTOR);
+      isPID   = stade->PID; 
+      ms_pid  = 0;
+      Serial.println("Pause is OFF");
+   }
 }

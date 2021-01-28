@@ -132,5 +132,35 @@ class SOutput {
      }
 };
 
-
+class SFlowSensor {
+   private:  
+      uint8_t *mas;
+      uint16_t Depth;
+      uint16_t Threshold;
+      uint16_t Min,Max;
+   public:
+      SFlowSensor(uint16_t _t, uint16_t _d=5, uint16_t _min=1, uint16_t _max=4){
+         Depth     = _d;
+         Min       = _min;
+         Max       = _max;
+         Threshold = _t;
+         mas = (uint8_t *)malloc(sizeof(uint8_t)*Depth);
+         for( int i=0; i<Depth; i++)mas[i] = 255; 
+      }
+      uint8_t Set( uint16_t _a){
+         for( int i=Depth-1; i>=1; i--)mas[i] = mas[i-1];   
+         if( _a < Threshold )mas[0] = 1;
+         else mas[0] = 0;
+         Serial.printf("DPA=%d DPD=%d\n",(int)_a,(int)mas[0]);
+         uint16_t n = 0;
+         for( int i=0; i<Depth; i++ ){
+             if( mas[i] == 255 )return 255;
+             n += (uint16_t)mas[i];
+          }
+          if( n <= Min )return 0;
+          if( n >= Max )return 1;
+          return 255;
+          
+      }
+};
 #endif

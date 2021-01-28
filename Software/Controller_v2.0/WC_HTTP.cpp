@@ -265,6 +265,11 @@ void HTTP_handleRoot() {
      wifiManager.server->sendContent("HTTP/1.1 301 OK\r\nLocation: /\r\nCache-Control: no-cache\r\n\r\n");
      return;
   }
+ if ( wifiManager.server->hasArg("Pause") || wifiManager.server->hasArg("PAUSE") ){
+     controlPause();
+     wifiManager.server->sendContent("HTTP/1.1 301 OK\r\nLocation: /\r\nCache-Control: no-cache\r\n\r\n");
+     return;
+  }
   char s[32];
   String content;
   HTTP_printHeader(content,"Home",0);
@@ -393,6 +398,7 @@ void HTTP_handleRoot() {
 */   
   content +="<input type='submit' name='SUBMIT' value='Apply'>"; 
   content +="<input type='submit' name='AUTO' value='Auto'>"; 
+  content +="<input type='submit' name='PAUSE' value='Pause'>"; 
 
 
   
