@@ -21,6 +21,7 @@ bool isAUTO  = false;
 bool isAlarm = false;
 bool isPause = false;
 bool isCheckDP = false;
+bool servoTimer = false;
 uint32_t msCheckDP = 0;
 PID_TYPE isPID  = PT_OFF, isPID_save = PT_NONE;
 // PID регулятор
@@ -29,11 +30,17 @@ float proc,_temp;
 uint32_t timePID = 600;
 int PID_WINDOW = 2000;
 uint32_t ms_pid =0, ms_start=0, ms_pause = 0;
-struct stageOfBrewing *stade;
+uint32_t ms_main_tm = 0, ms_phase_tm = 0;
 
-uint16_t tunerPID1 = 60;
-uint16_t tunerPID2 = 75;
-uint16_t tunerPID5 = 100;
+struct stageOfBrewing *stage;
+struct stageOfBrewing stages[STAGES_MAX];
+uint16_t CountStages = 0;
+
+struct stageOfHop hops[HOP_MAX];
+uint16_t CountHop = 0;
+//uint16_t tunerPID1 = 60;
+//uint16_t tunerPID2 = 75;
+//uint16_t tunerPID5 = 100;
 
 int servoAngle[6] = {5, 56, 105, 155, 155, 155};
 uint8_t servoPos  = 0;
@@ -48,6 +55,14 @@ TickType_t serialTick = 200, lcdTick = 200;
  * Старт всех параллельных задач
  */
 void tasksStart(){
+   SPIFFS.begin(true);
+   listDir("/");
+   eepromBegin();
+   eepromRead();
+   eepromDefault();
+   eepromSave();
+   eepromParamRead();
+   
    btnQueue  = xQueueCreate(sizeof(uint8_t), 10);
    pivoQueue = xQueueCreate(sizeof(uint8_t), 10);
    serialSemaphore = xSemaphoreCreateMutex();
@@ -204,8 +219,7 @@ void taskNetwork( void *pvParameters ){
 //               displayMQTT("Off");
                displayIP();
                isMQTT = false;
-               wifiManager.startConfigPortal(Config.ID,Config.ID_PASS,HTTP_begin);
-//           wifiManager.startConfigPortal(Config.ID,Config.ID_PASS);
+               wifiManager.startConfigPortal(config_ini.get("AP_NAME").c_str(),config_ini.get("AP_PASS").c_str(),HTTP_begin);
                WiFi.disconnect(); //  this alone is not enough to stop the autoconnecter
                WiFi.mode(WIFI_OFF);
 //               displayMode("");
@@ -220,8 +234,8 @@ void taskNetwork( void *pvParameters ){
 ///           vTaskResume( servoHandle );
       }
       else {
-         Serial.printf("%s %s\n",Config.AP_SSID,Config.AP_PASS);
-         wifiManager.checkWiFi(Config.AP_SSID,Config.AP_PASS);
+         Serial.printf("%s %s\n",config_ini.get("WIFI_NAME").c_str(),config_ini.get("WIFI_PASS").c_str());
+         wifiManager.checkWiFi(config_ini.get("WIFI_NAME").c_str(),config_ini.get("WIFI_PASS").c_str());
 ///         if( WiFi.status() == WL_CONNECTED )mqttReconnect();
 ///         mqttPublishParam();
       }
@@ -242,8 +256,9 @@ void taskNetwork( void *pvParameters ){
 void taskButtons( void *pvParameters ){
    semaphorePrint("Start Button Task");
 // Инициализация кнопок   
-//   btn2.SetLongClick(2000);   
-   btn2.SetMultiClick(500);
+   btn1.SetLongClick(2000);   
+   btn2.SetLongClick(2000);   
+//   btn2.SetMultiClick(500);
 //   btn2.SetAutoClick(20000,500);   
    attachInterrupt(digitalPinToInterrupt(PIN_BTN0), ISR_btn0, CHANGE);   
    attachInterrupt(digitalPinToInterrupt(PIN_BTN1), ISR_btn1, CHANGE);   
@@ -265,10 +280,10 @@ void taskButtons( void *pvParameters ){
                bizzer.SetBlinkMode(0B00000000); 
                Serial.println("Flow Sensor Alarm OFF");
             }
-            controlPause();
+            if((ret&0xf0) == 0x30)controlPause();
             break;
-         case SB_MULTI_CLICK :
-            if( (ret&0xf0) == 0x30 && btn2.Count == 2 ){
+         case SB_LONG_CLICK :
+            if( (ret&0xf0) == 0x30  ){
                Serial.printf("BTN2 long %d\n",btn2.Count);
                if( isAP == true ){
                   wifiManager.httpLoopBreak = true;;
@@ -277,6 +292,7 @@ void taskButtons( void *pvParameters ){
                   isAP = true;
                }               
             }
+            if( (ret&0xf0) == 0x20 && isAUTO )stopTaskPivo();
             Serial.printf("BTN 0x%x long click\n",ret&0xf0);
             break;
          case SB_AUTO_CLICK :
@@ -416,7 +432,7 @@ void taskPID( void *pvParameters ){
                  isPID = PT_OFF;
                  uint8_t ret = 1;
                  // Спускаем очередь 
-                 xQueueSendFromISR( pivoQueue, &ret, 0 );
+                 xQueueSend( pivoQueue, &ret, 0 );
              }
           }
           else bizzer.Off();
@@ -459,11 +475,16 @@ void mqttReconnect(){
 //          displayMQTT(" Off");
           if( xSemaphoreTake( serialSemaphore, serialTick ) ){
              Serial.printf("RSSI=%d\n",WiFi.RSSI());
-             Serial.printf("MQTT connect %s %u %s %s %s\n",Config.MQTT_SERVER,Config.MQTT_PORT,Config.ID,Config.MQTT_USER,Config.MQTT_PASS);
+             Serial.printf("MQTT connect %s %d %s %s %s\n",
+                config_ini.get("MQTT_SERVER").c_str(),
+                config_ini.get("MQTT_PORT").toInt(),
+                config_ini.get("AP_NAME").c_str(),
+                config_ini.get("MQTT_NAME").c_str(),
+                config_ini.get("MQTT_PASS").c_str());
              xSemaphoreGive( serialSemaphore );
           }
-          mqttClient.setServer(Config.MQTT_SERVER,Config.MQTT_PORT); 
-          if( mqttClient.connect(Config.ID,Config.MQTT_USER,Config.MQTT_PASS ) ){
+          mqttClient.setServer(config_ini.get("MQTT_SERVER").c_str(),config_ini.get("MQTT_PORT").toInt()); 
+          if( mqttClient.connect(config_ini.get("AP_NAME").c_str(),config_ini.get("MQTT_NAME").c_str(),config_ini.get("MQTT_PASS").c_str() ) ){
 //          if( mqttClient.connected() ){
 //              displayMQTT(" ON");         
               semaphorePrint("MQTT ON");
@@ -607,8 +628,23 @@ void taskServo( void *pvParameters ){
    */
    servoPos = 0;
    uint8_t servoSave = 255;
+   uint32_t _ms, _ms0 = 0;
 //   30, 58, 84, 111, 139, 166
    while( true ){
+       if( isAUTO && servoTimer && !isPause && ms_pid > 0  ){
+          _ms = millis();
+          if( _ms0 == 0 || _ms0 > _ms || (_ms-_ms0)>=10000 ){
+             _ms0 = _ms;
+             if( servoPos < CountHop ){
+                uint32_t t_hop = hops[CountHop].TIMER*60;
+                uint32_t t=(millis()-ms_pid)/1000+ms_pause;
+                if( t > t_hop )servoPos++;
+                if( servoPos == 1 && t > (t_hop+120) && t <= (t_hop+180) )tempPID = 0;
+                else tempPID = stage->T;
+             }
+          }
+       }
+    
        if( servoPos >= 6 )servoPos = 0;
        if( servoPos != servoSave ){
           if( xSemaphoreTake( lcdSemaphore, portMAX_DELAY ) ){
@@ -634,51 +670,57 @@ void taskServo( void *pvParameters ){
 }
 
 void taskPivo( void *pvParameters ){
-struct stageOfBrewing Brewing[] = {
-  
-  {1,   PT_T1,50.0,false,true,false,false,true,0,true},    //Доводим температуру до 50
-  {1200,PT_T0,55.0,true,false,false,false,true,0,true},      //55C 20мин
-  {4500,PT_T0,65.0,true,false,false,false,true,0,true},      //65C 75мин
-  {1800,PT_T0,73.0,true,false,false,false,true,0,true},      //73C 30мин
-  {300, PT_T0,78.0,true,false,false,false,true,0,true},      //78C 5мин
-  {300, PT_T1,100.0,false,false,false,false,false,0,false},   //Кипячение 100С 5мин
-  {60,  PT_POW1,1.0,false,false,false,false,false,1,false},  //Сброс хмеля 1 и 40 мин 50%
-  {2340,PT_POW1,50.0,false,false,false,false,false,1,false},  //Сброс хмеля 1 и 40 мин 50%
-  {15,  PT_POW1,50.0,false,false,false,false,false,2,false},  //Сброс хмеля 2
-  {900, PT_POW1,50.0,false,false,false,false,false,3,false},  //Сброс хмеля 3 и 15  мин 50%
-  {1,   PT_TC1,28,false,true,false,true,true,0,false},        //Охлаждение до 28
-//  {60,   PT_TC1,45,false,true,false,true,true,0,false},        //Охлаждение до 28
-  {1,   PT_DRAIN,0,false,false,true,true,true,0,false},       //слив
-  {0,   PT_OFF,0,false,false,false,false,false,0,false}       //Отключение всего
-};
+  makeStages();
   isAUTO = true;
+  servoTimer = false;
+  ms_main_tm = millis();
   uint8_t ret;
-  for( int i=0;true;i++){
-     stade = &Brewing[i]; 
-     Serial.printf("Step #%d %d\n",i, (int)Brewing[i].T);
-     isCheckDP = Brewing[i].CHECKDP;
+  for( int i=0;i<CountStages;i++){
+     if( !isAUTO )break;    
+     stage = &stages[i]; 
+     Serial.printf("Step #%d %s\n",i, stage->NAME.c_str());
+     isCheckDP = stage->CHECKDP;
      msCheckDP = millis();
      isAlarm   = false;
-     timePID = Brewing[i].TIMER;
-     tempPID = Brewing[i].T;
-     isPID   = Brewing[i].PID;     
+     timePID = stage->TIMER;
+     tempPID = stage->T;
+     isPID   = stage->PID;     
      isPID_save = PT_NONE;
-     Out0.Set(Brewing[i].OUT0);     
-     Out1.Set(Brewing[i].OUT1);     
-     Out2.Set(Brewing[i].OUT2);     
-     Out3.Set(Brewing[i].OUT3);    
-     Motor.Set(Brewing[i].MOTOR);    
-     servoPos = Brewing[i].SERVO; 
-     if( timePID == 0 )break;
+     Out0.Set(stage->OUT0);     
+     Out1.Set(stage->OUT1);     
+     Out2.Set(stage->OUT2);     
+     Out3.Set(stage->OUT3);    
+     Motor.Set(stage->MOTOR); 
+     servoPos = 0; 
+     servoTimer = stage->START_HOP;  
+//     if( 
+//     servoPos = Brewing[i].SERVO; 
+//     if( timePID == 0 )break;
      xQueueReceive( pivoQueue, &ret, portMAX_DELAY);
-     if( ret == 0 )break;      
   }
+  isPID = PT_OFF; 
+  Out0.Set(LOW);     
+  Out1.Set(LOW);     
+  Out2.Set(LOW);     
+  Out3.Set(LOW);    
+  Motor.Set(LOW);    
+  Heater.Set(false);
   isAUTO = false;
-
+  servoPos = 0; 
+  servoTimer = false;
+  ms_main_tm  = 0;
+  ms_phase_tm = 0;
+  Serial.println("Stop task PIVO");
 
 
   
   vTaskDelete( NULL ); 
+}
+
+void stopTaskPivo(){
+  uint8_t ret = 0;
+  isAUTO = false;
+  xQueueSend( pivoQueue, &ret, 0 );  
 }
 
 uint32_t pidCalcWindow( float t_cur, float t_pid, uint32_t max_window ){
@@ -717,15 +759,152 @@ void controlPause(){
       Motor.Set(false);
       Heater.Set(false);
       isPID   = PT_PAUSE; 
-      ms_pause += (millis()-ms_pid)/1000;
-      timePID -= ms_pause;
+      if( ms_pid > 0 ){
+         ms_pause += (millis()-ms_pid)/1000;
+         timePID -= ms_pause;
+      }
       Serial.println("Pause is ON");
    }
    else{
       isPause = false;
-      Motor.Set(stade->MOTOR);
-      isPID   = stade->PID; 
+      Motor.Set(stage->MOTOR);
+      isPID   = stage->PID; 
       ms_pid  = 0;
       Serial.println("Pause is OFF");
    }
+}
+
+void listDir(const char * dirname, uint8_t levels){
+    Serial.printf("Listing directory: %s\r\n", dirname);
+
+    File root = SPIFFS.open(dirname);
+    if(!root){
+        Serial.println("- failed to open directory");
+        return;
+    }
+    if(!root.isDirectory()){
+        Serial.println(" - not a directory");
+        return;
+    }
+
+    File file = root.openNextFile();
+    while(file){
+        if(file.isDirectory()){
+            Serial.print("  DIR : ");
+            Serial.println(file.name());
+            if(levels){
+                listDir(file.name(), levels -1);
+            }
+        } else {
+            Serial.print("  FILE: ");
+            Serial.print(file.name());
+            Serial.print("\tSIZE: ");
+            Serial.println(file.size());
+        }
+        file = root.openNextFile();
+    }
+} 
+
+void makeStages(){
+   uint32_t tm;
+   float t;
+   CountStages = 0;
+// Проверка воды
+   makeStage("Water Test",120,PT_POW1,0.0,false,true,false,false,true,true,true,false);
+// Предварительный нагрев воды
+   makeStage("Preheating",1,PT_T1,50.0,false,true,false,false,true,true,true,false);
+// Пауза 1
+   if( param_ini.get("PAUSE1") != "" ){
+      tm = ((uint32_t)param_ini.get("PAUSE1").toInt())*60;
+      t = param_ini.get("PAUSE_TEMP1").toFloat();
+      makeStage("Pause1",tm,PT_T0,t,true,false,false,false,true,true,true,false);
+   }
+// Пауза 2
+   if( param_ini.get("PAUSE2") != "" ){
+      tm = ((uint32_t)param_ini.get("PAUSE2").toInt())*60;
+      t = param_ini.get("PAUSE_TEMP2").toFloat();
+      makeStage("Pause2",tm,PT_T0,t,true,false,false,false,true,true,true,false);
+   }
+// Пауза 3
+   if( param_ini.get("PAUSE3") != "" ){
+      tm = ((uint32_t)param_ini.get("PAUSE3").toInt())*60;
+      t = param_ini.get("PAUSE_TEMP3").toFloat();
+      makeStage("Pause3",tm,PT_T0,t,true,false,false,false,true,true,true,false);
+   }
+// Пауза 4
+   if( param_ini.get("PAUSE4") != "" ){
+      tm = ((uint32_t)param_ini.get("PAUSE4").toInt())*60;
+      t = param_ini.get("PAUSE_TEMP4").toFloat();
+      makeStage("Pause4",tm,PT_T0,t,true,false,false,false,true,true,true,false);
+   }
+// Пауза 5
+   if( param_ini.get("PAUSE5") != "" ){
+      tm = ((uint32_t)param_ini.get("PAUSE5").toInt())*60;
+      t = param_ini.get("PAUSE_TEMP5").toFloat();
+      makeStage("Pause5",tm,PT_T0,t,true,false,false,false,true,true,true,false);
+   }
+// Пауза 6
+   if( param_ini.get("PAUSE6") != "" ){
+      tm = ((uint32_t)param_ini.get("PAUSE6").toInt())*60;
+      t = param_ini.get("PAUSE_TEMP6").toFloat();
+      makeStage("Pause6",tm,PT_T0,t,true,false,false,false,true,true,true,false);
+   }
+// Начало кипячения, сброс остатка сусла в трубке
+   makeStage("Pipe Cleaning",120,PT_POW1,100.0,true,false,false,false,true,true,true,false);
+// Нагрев до 100C
+   makeStage("Heating 100C",1,PT_T1,100.0,false,false,false,false,false,true,true,false);
+// Кипячение    
+   uint32_t tm_boil = ((uint32_t)param_ini.get("BOILING").toInt())*60;
+   makeStage("Boiling",tm_boil,PT_POW1,50.0,false,false,false,false,false,true,true,true);
+// Охлаждение   
+   t = param_ini.get("COOL_TEMP").toFloat();
+   makeStage("Cooling",1,PT_TC1,t,false,true,false,true,true,true,true,false);
+// Слив по датчику   
+   makeStage("Drain",1,PT_DRAIN,0,false,false,true,true,true,false,true,false);
+// Слить остатки 1 минута   
+   makeStage("Drain All",60,PT_POW1,0,false,false,true,true,true,false,true,false);
+// Сформировать рсписание по сбросу хмеля
+   CountHop = 0;
+   if( param_ini.get("HOP1") != "" ){
+      tm = ((uint32_t)param_ini.get("HOP1").toInt())*60;
+      if( tm < tm_boil ){
+         hops[CountHop].TIMER = tm;
+         hops[CountHop].SERVO = CountHop+1;
+         CountHop++;
+      }   
+   } 
+   if( param_ini.get("HOP2") != "" ){
+      tm = ((uint32_t)param_ini.get("HOP2").toInt())*60;
+      if( tm < tm_boil ){
+         hops[CountHop].TIMER = tm;
+         hops[CountHop].SERVO = CountHop+1;
+         CountHop++;
+      }   
+   } 
+   if( param_ini.get("HOP3") != "" ){
+      tm = ((uint32_t)param_ini.get("HOP3").toInt())*60;
+      if( tm < tm_boil ){
+         hops[CountHop].TIMER = tm;
+         hops[CountHop].SERVO = CountHop+1;
+         CountHop++;
+      }   
+   } 
+   
+}
+
+void makeStage(String _name, uint32_t _tm, PID_TYPE _pid, float _t, bool _o0, bool _o1, bool _o2, bool _o3, bool _m, bool _dp, bool _reset_tm, bool _start_hop){
+   stages[CountStages].NAME        = _name;
+   stages[CountStages].TIMER       = _tm;
+   stages[CountStages].PID         = _pid;
+   stages[CountStages].T           = _t;
+   stages[CountStages].OUT0        = _o0;
+   stages[CountStages].OUT1        = _o1;
+   stages[CountStages].OUT2        = _o2;
+   stages[CountStages].OUT3        = _o3;
+   stages[CountStages].MOTOR       = _m;
+//   stages[CountStages].SERVO       = _serv;
+   stages[CountStages].CHECKDP     = _dp;
+   stages[CountStages].TIMER_RESET = _reset_tm;
+   stages[CountStages].START_HOP   = _start_hop;
+   CountStages++; 
 }

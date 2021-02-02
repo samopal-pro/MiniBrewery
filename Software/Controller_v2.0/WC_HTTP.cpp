@@ -5,7 +5,8 @@
 * http://samopal.pro
 */
 #include "WC_HTTP.h"
-
+#define   ParamCheck(name,var) if( wifiManager.server->hasArg(name))param_ini.set(var,wifiManager.server->arg(name))
+ 
 //WebServer server = wifiManager.server;
 
 uint32_t HTTP_TM=180000, http_ms;
@@ -19,6 +20,7 @@ void HTTP_begin(void){
 //   Serial.println(WiFi.softAPIP()); 
 // Поднимаем WEB-сервер  
    wifiManager.server->on ( "/", HTTP_handleRoot );
+   wifiManager.server->on ( "/manual", HTTP_handleManual );
    wifiManager.server->on ( "/param", HTTP_handleParam );
    wifiManager.server->on ( "/config", HTTP_handleConfig );
    wifiManager.server->on("/update", HTTP_POST, []() {
@@ -27,17 +29,12 @@ void HTTP_begin(void){
       ESP.restart();
       },HTTP_handleUpdate);
     wifiManager.server->on("/upload", HTTP_GET, HTTP_handleUpload);
-
     wifiManager.server->on ( "/reboot", HTTP_handleReboot );
-
     wifiManager.server->onNotFound ( HTTP_handleNotFound );
   //here the list of headers to be recorded
     const char * headerkeys[] = {"User-Agent","Cookie"} ;
     size_t headerkeyssize = sizeof(headerkeys)/sizeof(char*);
-    wifiManager.server->collectHeaders(headerkeys, headerkeyssize );
-
-
-   
+    wifiManager.server->collectHeaders(headerkeys, headerkeyssize );  
     wifiManager.server->begin();
     Serial.printf( "HTTP server started ...\n" );
     http_ms = millis();
@@ -49,7 +46,6 @@ void HTTP_stop(void){
 //  dnswifiManager.server->stop();
 //  wifiManager.server->stop();
 }
-
 
 /**
  * Вывод в буфер одного поля формы
@@ -97,7 +93,7 @@ void HTTP_printHeader(String &out,const char *title, uint16_t refresh){
   out += "<h3>";
   out += title;
   out += " ";
-  out += Config.ID;
+  out += config_ini.get("AP_NAME");
   out += "</h3>";
   http_ms = millis();
 //  DisplayText2((char *)title);
@@ -170,18 +166,58 @@ void HTTP_handleLogin() {
   wifiManager.server->send(200, "text/html", content);
 }
 
-
 //root page can be accessed only if authentification is ok
-void HTTP_handleParam() {
-  if (wifiManager.captivePortal()) return;
+void HTTP_handleRoot() {
+   if( wifiManager.server->hasArg("Start") ) {
+     xTaskCreateUniversal(taskPivo, "pivo", 2048, NULL, 3, NULL,1);   
+     wifiManager.server->sendContent("HTTP/1.1 301 OK\r\nLocation: /\r\nCache-Control: no-cache\r\n\r\n");
+     return;
+   }
+   if ( wifiManager.server->hasArg("Pause") || wifiManager.server->hasArg("Resume") ){
+     controlPause();
+     wifiManager.server->sendContent("HTTP/1.1 301 OK\r\nLocation: /\r\nCache-Control: no-cache\r\n\r\n");
+     return;
+   }
+   if( wifiManager.server->hasArg("Stop") ) {
+     stopTaskPivo();
+     wifiManager.server->sendContent("HTTP/1.1 301 OK\r\nLocation: /\r\nCache-Control: no-cache\r\n\r\n");
+     return;
+   }
   char s[64];
   String content = "";
-  content += "<html>\n<head>\n<meta charset=\"utf-8\" />\n";
-  content += "<meta http-equiv='refresh' content='5' />\n";
-  content += "<title>Params page</title>\n";
-  content += "<style>body { background-color: #cccccc; font-family: Arial, Helvetica, Sans-Serif; Color: #000088; }</style>\n</head>\n";
-  content += "<body>\n";
-  content += "<p><a href=/>Home</a>";
+//  content += "<html>\n<head>\n<meta charset=\"utf-8\" />\n";
+//  content += "<meta http-equiv='refresh' content='5' />\n";
+//  content += "<title>Params page</title>\n";
+//  content += "<style>body { background-color: #cccccc; font-family: Arial, Helvetica, Sans-Serif; Color: #000088; }</style>\n</head>\n";
+//  content += "<body>\n";
+  HTTP_printHeader(content,"Main",5);
+  content += "<ul>";
+//  content += "<li><a href=/>Home</a>";
+  content += "<li><a href=/param>Params</a><br>";
+  content += "<li><a href=/manual>Manual</a><br>";
+  content += "<li><a href=/config>Config</a><br>";
+  content += "<li><a href=/upload>Firmware</a><br>";
+  content += "<li><a href=/reboot>Reboot</a><br>";
+  content += "</ul>";
+
+
+  if( ms_main_tm > 0 ){
+     uint32_t t=(millis()-ms_main_tm)/1000;
+     char s[10];
+     sprintf(s,"%02d:%02d",(int)(t/60),(int)(t%60));
+     content += "<p>Timer: ";
+     content += s;
+  }
+
+  
+  if( ms_pid > 0 ){
+     uint32_t t=(millis()-ms_pid)/1000+ms_pause;
+     char s[10];
+     sprintf(s,"%02d:%02d",(int)(t/60),(int)(t%60));
+     content += " Phase: ";
+     content += s;
+  }
+
    
   content += "<p>Temperature, C: ";
   sprintf(s,"T1=%d.%01d T2=%d.%01d<br>\n",(int)DT0,(int)(DT0*10)%10,(int)DT1,(int)(DT1*10)%10);
@@ -191,15 +227,188 @@ void HTTP_handleParam() {
   content += s;
   sprintf(s,"<p>Type=%d POW=%d\n",(int)isPID,(int)proc);
   content += s;
- sprintf(s,"<p>Motor=%d Valve=%d %d %d %d>\n",(int)Motor.Stat(),(int)Out0.Stat(),(int)Out1.Stat(),(int)Out2.Stat(),(int)Out3.Stat());
+  sprintf(s,"<p>Motor=%d Valve=%d %d %d %d\n",(int)Motor.Stat(),(int)Out0.Stat(),(int)Out1.Stat(),(int)Out2.Stat(),(int)Out3.Stat());
   content += s;
+  if( DP1 )content += "<p>DP1=On";
+  else content += "<p>DP1=Off";
+  content += "<form action='/' method='POST'><table><tr>";
+  if( isAUTO ){
+     if( isPause )content +="<input type='submit' name='Resume' value='Resume'> "; 
+     else content +="<input type='submit' name='Pause' value='Pause'> ";  
+     content +="<input type='submit' name='Stop' value='Stop'> "; 
+  }
+  else {
+     content +="<input type='submit' name='Start' value='Start'> "; 
+  }
+  content += "</form>";
+  content += "</body>\n</html>\n";
+  wifiManager.server->send(200, "text/html", content);
+}
 
-    content += "</body>\n</html>\n";
+void HTTP_handleParam() {
+  if( wifiManager.server->hasArg("Save") ) {
+     param_ini.clear();
+     ParamCheck("PREHEATING","PREHEATING");
+     if(wifiManager.server->hasArg("PAUSE1")){
+        ParamCheck("PAUSE_TM1","PAUSE1");  
+        ParamCheck("PAUSE_TEMP1","PAUSE_TEMP1");  
+     }
+     if(wifiManager.server->hasArg("PAUSE2")){
+        ParamCheck("PAUSE_TM2","PAUSE2");  
+        ParamCheck("PAUSE_TEMP2","PAUSE_TEMP2");  
+     }
+     if(wifiManager.server->hasArg("PAUSE3")){
+        ParamCheck("PAUSE_TM3","PAUSE3");  
+        ParamCheck("PAUSE_TEMP3","PAUSE_TEMP3");  
+     }
+     if(wifiManager.server->hasArg("PAUSE4")){
+        ParamCheck("PAUSE_TM4","PAUSE4");  
+        ParamCheck("PAUSE_TEMP4","PAUSE_TEMP4");  
+     }
+     if(wifiManager.server->hasArg("PAUSE5")){
+        ParamCheck("PAUSE_TM5","PAUSE5");  
+        ParamCheck("PAUSE_TEMP5","PAUSE_TEMP5");  
+     }
+     if(wifiManager.server->hasArg("PAUSE6")){
+        ParamCheck("PAUSE_TM6","PAUSE6");  
+        ParamCheck("PAUSE_TEMP6","PAUSE_TEMP6");  
+     }
+     ParamCheck("BOILING","BOILING");
+     if(wifiManager.server->hasArg("HOP1"))ParamCheck("HOP_TM1","HOP1");  
+     if(wifiManager.server->hasArg("HOP2"))ParamCheck("HOP_TM2","HOP2");  
+     if(wifiManager.server->hasArg("HOP3"))ParamCheck("HOP_TM3","HOP3");  
+     ParamCheck("COOL_TEMP","COOL_TEMP");
+     eepromParamSave();    
+     eepromParamRead();    
+     wifiManager.server->sendContent("HTTP/1.1 301 OK\r\nLocation: /param\r\nCache-Control: no-cache\r\n\r\n");
+     return;
+   }
+   if( wifiManager.server->hasArg("Default") ) {
+     eepromParamDefault();    
+     eepromParamSave();    
+     eepromParamRead();    
+     wifiManager.server->sendContent("HTTP/1.1 301 OK\r\nLocation: /param\r\nCache-Control: no-cache\r\n\r\n");
+     return;
+   }
+   if( wifiManager.server->hasArg("Start") ) {
+     xTaskCreateUniversal(taskPivo, "pivo", 2048, NULL, 3, NULL,1);   
+     wifiManager.server->sendContent("HTTP/1.1 301 OK\r\nLocation: /\r\nCache-Control: no-cache\r\n\r\n");
+     return;
+   }
+   if ( wifiManager.server->hasArg("Pause") || wifiManager.server->hasArg("Resume") ){
+     controlPause();
+     wifiManager.server->sendContent("HTTP/1.1 301 OK\r\nLocation: /param\r\nCache-Control: no-cache\r\n\r\n");
+     return;
+   }
+   if( wifiManager.server->hasArg("Stop") ) {
+     stopTaskPivo();
+     wifiManager.server->sendContent("HTTP/1.1 301 OK\r\nLocation: /param\r\nCache-Control: no-cache\r\n\r\n");
+     return;
+   }
+
+
+   String content = "";
+   HTTP_printHeader(content,"Params Setting");
+   content += "<ul>";
+   content += "<li><a href=/>Home</a>";
+//   content += "<li><a href=/param>Params</a><br>";
+   content += "<li><a href=/manual>Manual</a><br>";
+   content += "<li><a href=/config>Config</a><br>";
+   content += "<li><a href=/upload>Firmware</a><br>";
+   content += "<li><a href=/reboot>Reboot</a><br>";
+   content += "</ul>";
+//   out += "<a href=\"/login?DISCONNECT=YES\">Sign out</a>";
+// Печатаем время в форму для корректировки
+   content += "<form action='/param' method='POST'><table><tr>";
+   content += "<b>Params Setting</b><br>"; 
+   content += "<table><tr>";
+   HTTP_printInput(content,"PREHEATING, C:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;","PREHEATING",param_ini.get("PREHEATING").c_str(),16,32);
+   content += "</tr></table>";
+
+   content += "<table><tr>";
+   content += "<td>PAUSE1</td><td><input name=\"PAUSE1\" type=\"checkbox\" ";
+   if( param_ini.get("PAUSE1") != "" )content += "checked=\"checked\"";
+   content += "/>&nbsp;</td>";
+   HTTP_printInput(content,"TIME, min:","PAUSE_TM1",param_ini.get("PAUSE1").c_str(),16,32);
+   HTTP_printInput(content,"TEMP, C:","PAUSE_TEMP1",param_ini.get("PAUSE_TEMP1").c_str(),16,32);
+   content += "</tr><tr>";
+   content += "<td>PAUSE2</td><td><input name=\"PAUSE2\" type=\"checkbox\" ";
+   if( param_ini.get("PAUSE2") != "" )content += "checked=\"checked\"";
+   content += "/>&nbsp;</td>";
+   HTTP_printInput(content,"TIME, min:","PAUSE_TM2",param_ini.get("PAUSE2").c_str(),16,32);
+   HTTP_printInput(content,"TEMP, C:","PAUSE_TEMP2",param_ini.get("PAUSE_TEMP2").c_str(),16,32);
+   content += "</tr><tr>";
+   content += "<td>PAUSE3</td><td><input name=\"PAUSE3\" type=\"checkbox\" ";
+   if( param_ini.get("PAUSE3") != "" )content += "checked=\"checked\"";
+   content += "/>&nbsp;</td>";
+   HTTP_printInput(content,"TIME, min:","PAUSE_TM3",param_ini.get("PAUSE3").c_str(),16,32);
+   HTTP_printInput(content,"TEMP, C:","PAUSE_TEMP3",param_ini.get("PAUSE_TEMP3").c_str(),16,32);
+   content += "</tr><tr>";
+   content += "<td>PAUSE4</td><td><input name=\"PAUSE4\" type=\"checkbox\" ";
+   if( param_ini.get("PAUSE4") != "" )content += "checked=\"checked\"";
+   content += "/>&nbsp;</td>";
+   HTTP_printInput(content,"TIME, min:","PAUSE_TM4",param_ini.get("PAUSE4").c_str(),16,32);
+   HTTP_printInput(content,"TEMP, C:","PAUSE_TEMP4",param_ini.get("PAUSE_TEMP4").c_str(),16,32);
+   content += "</tr><tr>";
+   content += "<td>PAUSE5</td><td><input name=\"PAUSE5\" type=\"checkbox\" ";
+   if( param_ini.get("PAUSE5") != "" )content += "checked=\"checked\"";
+   content += "/>&nbsp;</td>";
+   HTTP_printInput(content,"TIME, min:","PAUSE_TM5",param_ini.get("PAUSE5").c_str(),16,32);
+   HTTP_printInput(content,"TEMP, C:","PAUSE_TEMP5",param_ini.get("PAUSE_TEMP5").c_str(),16,32);
+   content += "</tr><tr>";
+   content += "<td>PAUSE6</td><td><input name=\"PAUSE6\" type=\"checkbox\" ";
+   if( param_ini.get("PAUSE6") != "" )content += "checked=\"checked\"";
+   content += "/>&nbsp;</td>";
+   HTTP_printInput(content,"TIME, min:","PAUSE_TM6",param_ini.get("PAUSE6").c_str(),16,32);
+   HTTP_printInput(content,"TEMP, C:","PAUSE_TEMP6",param_ini.get("PAUSE_TEMP6").c_str(),16,32);
+   content += "</tr></table>";
+
+   content += "<table><tr>";
+   HTTP_printInput(content,"BOILING, MIN:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;","BOILING",param_ini.get("BOILING").c_str(),16,32);
+   content += "</tr></table>";
+
+   content += "<table><tr>";
+   content += "<td>HOP1&nbsp;&nbsp;&nbsp;&nbsp</td><td><input name=\"HOP1\" type=\"checkbox\" ";
+   if( param_ini.get("HOP1") != "" )content += "checked=\"checked\"";
+   content += "/>&nbsp;</td>";
+   HTTP_printInput(content,"TIME, min:","HOP_TM1",param_ini.get("HOP1").c_str(),16,32);
+   content += "</tr><tr>";
+   content += "<td>HOP2&nbsp;&nbsp;&nbsp;&nbsp</td><td><input name=\"HOP2\" type=\"checkbox\" ";
+   if( param_ini.get("HOP2") != "" )content += "checked=\"checked\"";
+   content += "/>&nbsp;</td>";
+   HTTP_printInput(content,"TIME, min:","HOP_TM2",param_ini.get("HOP2").c_str(),16,32);
+   content += "</tr><tr>";
+   content += "<td>HOP3&nbsp;&nbsp;&nbsp;&nbsp</td><td><input name=\"HOP3\" type=\"checkbox\" ";
+   if( param_ini.get("HOP3") != "" )content += "checked=\"checked\"";
+   content += "/>&nbsp;</td>";
+   HTTP_printInput(content,"TIME, min:","HOP_TM3",param_ini.get("HOP3").c_str(),16,32);
+   content += "</tr></table>";
+
+   content += "<table><tr>";
+   HTTP_printInput(content,"COOLING, C:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;","COOL_TEMP",param_ini.get("COOL_TEMP").c_str(),16,32);
+   content += "</tr></table>";
+
+  if( isAUTO ){
+     if( isPause )content +="<input type='submit' name='Resume' value='Resume'> "; 
+     else content +="<input type='submit' name='Pause' value='Pause'> ";  
+     content +="<input type='submit' name='Stop' value='Stop'> "; 
+  }
+  else {
+     content +="<input type='submit' name='Save' value='Save'> "; 
+     content +="<input type='submit' name='Default' value='Default'> "; 
+     content +="<input type='submit' name='Start' value='Start'> "; 
+  }
+//  content +="<input type='submit' name='AUTO' value='Auto'>"; 
+//  content +="<input type='submit' name='PAUSE' value='Pause'>"; 
+
+   content += "</form>";
+
+  HTTP_printTail(content);
   wifiManager.server->send(200, "text/html", content);
 }
 
 //root page can be accessed only if authentification is ok
-void HTTP_handleRoot() {
+void HTTP_handleManual() {
   if (wifiManager.captivePortal()) { // If captive portal redirect instead of displaying the error page.
     return;
   }
@@ -213,37 +422,10 @@ void HTTP_handleRoot() {
          PID_TYPE savePID = isPID;
          isPID = (PID_TYPE)atoi(wifiManager.server->arg("PID").c_str());
          isPID_save = PT_NONE;
-/*
-         if( isPID != savePID ){
-            if( isPID == PT_OFF ){
-               myPID.SetMode(MANUAL);
-               Heater.Set(LOW);
-               TT1 = 0;         
-            }
-            else {
-               myPID.SetMode(AUTOMATIC); 
-               ms_pid = millis();             
-            }
-         }
-         */
      }  
      if( wifiManager.server->hasArg("TIME_PID")){
          timePID = (uint32_t)atoi(wifiManager.server->arg("TIME_PID").c_str());
      }
-/*
-     if( wifiManager.server->hasArg("TUNER_PID5")){
-         uint16_t x = (uint16_t)atoi(wifiManager.server->arg("TUNER_PID5").c_str());
-         if( x <= 100 )tunerPID5 = x;
-     }
-     if( wifiManager.server->hasArg("TUNER_PID2")){
-         uint16_t x = (uint16_t)atoi(wifiManager.server->arg("TUNER_PID2").c_str());
-         if( x <= 100 )tunerPID2 = x;
-     }
-     if( wifiManager.server->hasArg("TUNER_PID1")){
-         uint16_t x = (uint16_t)atoi(wifiManager.server->arg("TUNER_PID1").c_str());
-         if( x <= 100 )tunerPID1 = x;
-     }
-*/
      if( wifiManager.server->hasArg("OUT0"))Out0.Set(HIGH); 
      else Out0.Set(LOW); 
      if( wifiManager.server->hasArg("OUT1"))Out1.Set(HIGH); 
@@ -272,32 +454,19 @@ void HTTP_handleRoot() {
   }
   char s[32];
   String content;
-  HTTP_printHeader(content,"Home",0);
- content += "<p><a href=/param>Param</a><br>";
-  content += "<p><a href=/config>Config</a><br>";
-  content += "<a href=/upload>Firmware</a><br>";
-  content += "<a href=/reboot>Reboot</a><br>";
-//  content
-//  content += "<a href=\"/login?DISCONNECT=YES\">Sign out</a>";
-// Печатаем время в форму для корректировки
+  HTTP_printHeader(content,"Control Manual",0);
+  content += "<ul>";
+  content += "<li><a href=/>Home</a>";
+  content += "<li><a href=/param>Params</a><br>";
+//  content += "<li><a href=/manual>Manual</a><br>";
+  content += "<li><a href=/config>Config</a><br>";
+  content += "<li><a href=/upload>Firmware</a><br>";
+  content += "<li><a href=/reboot>Reboot</a><br>";
+  content += "</ul>";
+
   content += "<form action='/' method='POST'><table><tr>";
   content += "<b>NANOBREWERY CONTROL</b><br>";
  // content += "<iframe src='/param' width='100%'>Frame erroe</iframe>\n";
-/*  
-  content += "<p>T0=";
-  sprintf(s,"%d.%01d",(int)DT0,(int)(DT0*10)%10);
-  content += s; 
-  sprintf(s,"%d.%01d",(int)DT1,(int)(DT1*10)%10);
-  content += "<p>T1=";
-  content += s; 
-  sprintf(s,"%d",(int)DP1);
-  content += "<p>DP1=";
-  content += s; 
-  sprintf(s,"%d.%01d",(int)TT1,(int)(TT1*10)%10);
-  content += "<p>TT1=";
-  content += s; 
-  content += "</p>\n";
-*/  
   content += "<table><tr>";
   content += "<td>Valves</td>";
   content += "<td>0:<input name=\"OUT0\" type=\"checkbox\" ";
@@ -328,16 +497,6 @@ void HTTP_handleRoot() {
   sprintf(s,"%d",(int)timePID);
   HTTP_printInput(content,"Time,s:","TIME_PID",s,8,8);
   content += "</tr></table>";
-/*
-  content += "<table><tr>";
-  sprintf(s,"%d",(int)tunerPID5);
-  HTTP_printInput(content,"Tune heart,Dt5:","TUNER_PID5",s,8,8);
-  sprintf(s,"%d",(int)tunerPID2);
-  HTTP_printInput(content,"Dt2:","TUNER_PID2",s,8,8);
-  sprintf(s,"%d",(int)tunerPID1);
-  HTTP_printInput(content,"Dt1:","TUNER_PID1",s,8,8);
-  content += "</tr></table>";
-*/
   
   content += "<table><tr>";
   content += "<td>Motor:<input name=\"MOTOR\" type=\"checkbox\" ";
@@ -366,47 +525,11 @@ void HTTP_handleRoot() {
   content += "></td>";
   content += "</tr></table>";
   
-  
-   
-/*   
-   out += "<table><tr>";
-   HTTP_printInput(out,"ID:","ID",Config.ID,16,32);
-   out += "</tr><tr>";
-   HTTP_printInput(out,"Pass:","ID_PASS",Config.ID_PASS,16,32,true);
-   out += "</tr></table>";
-   out += "<b>WiFi Setting</b><br>";
-  
-   out += "<table><tr>";
-   HTTP_printInput(out,"SSID:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;","AP_SSID",Config.AP_SSID,16,32);
-   out += "</tr><tr>";
-   HTTP_printInput(out,"Pass:","AP_PASS",Config.AP_PASS,16,32,true);
-   out += "</tr></table>";
-   out += "<b>MQTT Setting</b><br>";
-   out += "<table><tr>";
-   HTTP_printInput(out,"Server:","MQTT_SERVER",Config.MQTT_SERVER,16,32);
-   out += "</tr><tr>";
-   sprintf(str,"%u",Config.MQTT_PORT);
-   HTTP_printInput(out,"Port:","MQTT_PORT",str,16,32);
-   out += "</tr><tr>";
-   HTTP_printInput(out,"User:","MQTT_USER",Config.MQTT_USER,16,32);
-   out += "</tr><tr>";
-   HTTP_printInput(out,"Pass:","MQTT_PASS",Config.MQTT_PASS,16,32,true);
-   out += "</tr><tr>";
-   sprintf(str,"%u",Config.MQTT_TM);
-   HTTP_printInput(out,"Send TM:","MQTT_TM",str,16,32);
-   out += "</tr></table>";
-*/   
-  content +="<input type='submit' name='SUBMIT' value='Apply'>"; 
-  content +="<input type='submit' name='AUTO' value='Auto'>"; 
-  content +="<input type='submit' name='PAUSE' value='Pause'>"; 
-
-
+  if( !isAUTO )content +="<input type='submit' name='SUBMIT' value='Apply'>"; 
   
   HTTP_printTail(content);
   wifiManager.server->send(200, "text/html", content);
 }
-
-
 
 //no need authentification
 void HTTP_handleNotFound() {
@@ -449,102 +572,75 @@ void HTTP_handleLogo(void) {
 //  wifiManager.server->send_P(200, PSTR("image/png"), logo, sizeof(logo));
 }
   
-
-
-
- 
 /*
  * Оработчик страницы настройки сервера
  */
 void HTTP_handleConfig(void) {
   Serial.println("Config Page");
-/*  
-  if (!is_authentified()) {
-    wifiManager.server->sendHeader("Location", "/login");
-    wifiManager.server->sendHeader("Cache-Control", "no-cache");
-    wifiManager.server->send(301);
-    return;
-  }
-*/
 // Сохранение настроек
 
-  if ( wifiManager.server->hasArg("ID") ){
-     if( wifiManager.server->hasArg("ID")          )strcpy(Config.ID,wifiManager.server->arg("ID").c_str());
-     if( wifiManager.server->hasArg("ID_PASS")          )strcpy(Config.ID_PASS,wifiManager.server->arg("ID_PASS").c_str());
-     if( wifiManager.server->hasArg("NET")         ){
-        if(wifiManager.server->arg("NET") == "GSM")Config.NET = NT_GSM;
-        else Config.NET = NT_WIFI; 
-        Serial.printf("NET=%s\n",wifiManager.server->arg("NET").c_str());
-     }
-     if( wifiManager.server->hasArg("AP_SSID")     )strcpy(Config.AP_SSID,wifiManager.server->arg("AP_SSID").c_str());
-     if( wifiManager.server->hasArg("AP_PASS")     )strcpy(Config.AP_PASS,wifiManager.server->arg("AP_PASS").c_str());
-     if( wifiManager.server->hasArg("MQTT_SERVER") )strcpy(Config.MQTT_SERVER,wifiManager.server->arg("MQTT_SERVER").c_str());
-     if( wifiManager.server->hasArg("MQTT_PORT")   )Config.MQTT_PORT = atoi(wifiManager.server->arg("MQTT_PORT").c_str());
-     if( wifiManager.server->hasArg("MQTT_USER")   )strcpy(Config.MQTT_USER,wifiManager.server->arg("MQTT_USER").c_str());
-     if( wifiManager.server->hasArg("MQTT_PASS")   )strcpy(Config.MQTT_PASS,wifiManager.server->arg("MQTT_PASS").c_str());
-     if( wifiManager.server->hasArg("MQTT_TM")     )Config.MQTT_TM = atoi(wifiManager.server->arg("MQTT_TM").c_str());
+  if ( wifiManager.server->hasArg("WIFI_NAME") ){
+     if( wifiManager.server->hasArg("WIFI_NAME")   )config_ini.set("WIFI_NAME",wifiManager.server->arg("WIFI_NAME"));
+     if( wifiManager.server->hasArg("WIFI_NAME")   )config_ini.set("WIFI_PASS",wifiManager.server->arg("WIFI_NAME"));
+     if( wifiManager.server->hasArg("MQTT_SERVER") )config_ini.set("MQTT_SERVER",wifiManager.server->arg("MQTT_SERVER"));
+     if( wifiManager.server->hasArg("MQTT_PORT")   )config_ini.set("MQTT_PORT",wifiManager.server->arg("MQTT_PORT"));
+     if( wifiManager.server->hasArg("MQTT_USER")   )config_ini.set("MQTT_USER",wifiManager.server->arg("MQTT_USER"));
+     if( wifiManager.server->hasArg("MQTT_PASS")   )config_ini.set("MQTT_PASS",wifiManager.server->arg("MQTT_PASS"));
+     if( wifiManager.server->hasArg("MQTT_TM")     )config_ini.set("MQTT_TM",wifiManager.server->arg("MQTT_TM"));
      eepromSave();    
+     eepromRead();    
      String header = "HTTP/1.1 301 OK\r\nLocation: /config\r\nCache-Control: no-cache\r\n\r\n";
      wifiManager.server->sendContent(header);
      return;
   }
 
-   String out = "";
+   String content = "";
    char str[10];
-   HTTP_printHeader(out,"Config");
-   out += "<p><a href=/>Home</a><br>";
-   out += "<a href=/upload>Firmware</a><br>";
-   out += "<a href=/reboot>Reboot</a><br>";
+   HTTP_printHeader(content,"Config");
+   content += "<ul>";
+   content += "<li><a href=/>Home</a>";
+   content += "<li><a href=/param>Params</a><br>";
+   content += "<li><a href=/manual>Manual</a><br>";
+//  content += "<li><a href=/config>Config</a><br>";
+   content += "<li><a href=/upload>Firmware</a><br>";
+   content += "<li><a href=/reboot>Reboot</a><br>";
+   content += "</ul>";
 //   out += "<a href=\"/login?DISCONNECT=YES\">Sign out</a>";
 // Печатаем время в форму для корректировки
-   out += "<form action='/config' method='POST'><table><tr>";
-   out += "<b>Controller Setting</b><br>";
-   out += "<table><tr>";
-   HTTP_printInput(out,"ID:","ID",Config.ID,16,32);
-   out += "</tr><tr>";
-   HTTP_printInput(out,"Pass:","ID_PASS",Config.ID_PASS,16,32,true);
-/*
-   out += "</tr><tr>";
-   out += "<td>Network:&nbsp;</td><td>";
-   out +="<p>GSM <input type='radio' name='NET' value='GSM'";
-   if( Config.NET == NT_GSM )out +="checked";
-   out += ">";
-   out +="WiFi <input type='radio' name='NET' value='WIFI'";
-   if( Config.NET == NT_WIFI )out +="checked";
-   out += "></td>"; 
-*/ 
-   out += "</tr></table>";
-   out += "<b>WiFi Setting</b><br>";
+   content += "<form action='/config' method='POST'><table><tr>";
+   content += "<b>Controller Setting</b><br>";
+//   content += "<table><tr>";
+//   HTTP_printInput(content,"AP_NAME:","AP_NAME",Config.ID,16,32);
+//   content += "</tr><tr>";
+//   HTTP_printInput(content,"Pass:","ID_PASS",Config.ID_PASS,16,32,true);
+//   content += "</tr></table>";
+   content += "<b>WiFi Setting</b><br>";
   
-   out += "<table><tr>";
-   HTTP_printInput(out,"SSID:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;","AP_SSID",Config.AP_SSID,16,32);
-   out += "</tr><tr>";
-   HTTP_printInput(out,"Pass:","AP_PASS",Config.AP_PASS,16,32,true);
-   out += "</tr></table>";
-   out += "<b>MQTT Setting</b><br>";
-   out += "<table><tr>";
-   HTTP_printInput(out,"Server:","MQTT_SERVER",Config.MQTT_SERVER,16,32);
-   out += "</tr><tr>";
-   sprintf(str,"%u",Config.MQTT_PORT);
-   HTTP_printInput(out,"Port:","MQTT_PORT",str,16,32);
-   out += "</tr><tr>";
-   HTTP_printInput(out,"User:","MQTT_USER",Config.MQTT_USER,16,32);
-   out += "</tr><tr>";
-   HTTP_printInput(out,"Pass:","MQTT_PASS",Config.MQTT_PASS,16,32,true);
-   out += "</tr><tr>";
-   sprintf(str,"%u",Config.MQTT_TM);
-   HTTP_printInput(out,"Send TM:","MQTT_TM",str,16,32);
-   out += "</tr></table>";
+   content += "<table><tr>";
+   HTTP_printInput(content,"WIFI NAME:","WIFI_SSID",config_ini.get("WIFI_NAME").c_str(),16,32);
+   content += "</tr><tr>";
+   HTTP_printInput(content,"WIFI PASS:","WIFI_PASS",config_ini.get("WIFI_PASS").c_str(),16,32,true);
+   content += "</tr></table>";
+   content += "<b>MQTT Setting</b><br>";
+   content += "<table><tr>";
+   HTTP_printInput(content,"Server:","MQTT_SERVER",config_ini.get("MQTT_SERVER").c_str(),16,32);
+   content += "</tr><tr>";
+   HTTP_printInput(content,"Port:","MQTT_PORT",config_ini.get("MQTT_PORT").c_str(),16,32);
+   content += "</tr><tr>";
+   HTTP_printInput(content,"User:","MQTT_USER",config_ini.get("MQTT_USER").c_str(),16,32);
+   content += "</tr><tr>";
+   HTTP_printInput(content,"Pass:","MQTT_PASS",config_ini.get("MQTT_PASS").c_str(),16,32,true);
+   content += "</tr><tr>";
+   HTTP_printInput(content,"Send TM (ms):","MQTT_TM",config_ini.get("MQTT_TM").c_str(),16,32);
+   content += "</tr></table>";
    
-   out +="<input type='submit' name='SUBMIT' value='Save Setting'>"; 
+   content +="<input type='submit' name='SUBMIT' value='Save Setting'>"; 
     
-   out += "</form></body></html>";
-   wifiManager.server->send ( 200, "text/html", out );
+   content += "</form></body></html>";
+   wifiManager.server->send ( 200, "text/html", content );
    
 
 }        
-
-
 
 /*
  * Сброс настрое по умолчанию
@@ -562,27 +658,16 @@ void HTTP_handleDefault(void) {
   */
 }
 
-
-
-
-
 /*
  * Перезагрузка часов
  */
 void HTTP_handleReboot(void) {
   Serial.println("Reboot Conttroller");
-/*  
-  if (!is_authentified()) {
-    wifiManager.server->sendHeader("Location", "/login");
-    wifiManager.server->sendHeader("Cache-Control", "no-cache");
-    wifiManager.server->send(301);
-    return;
-  }
-*/  
   String content;
   HTTP_printHeader(content,"Reboot Controller");
   content += "<p><b>Controller reset...</b>";
   HTTP_printTail(content);
+//  String header = "HTTP/1.1 301 OK\r\nLocation: /param\r\nCache-Control: no-cache\r\n\r\n";
   wifiManager.server->send(200, "text/html", content);
   delay(2000);
   ESP.restart();    
@@ -676,17 +761,16 @@ void HTTP_handleUpdate() {
 
 void HTTP_handleUpload() {
   Serial.println("Upload Page");
-/*  
-  if (!is_authentified()) {
-    wifiManager.server->sendHeader("Location", "/login");
-    wifiManager.server->sendHeader("Cache-Control", "no-cache");
-    wifiManager.server->send(301);
-    return;
-  }
-*/  
   String content;
   HTTP_printHeader(content,"Firmware");
-  content += "<p><a href=/>Home</a><br>";  
+  content += "<ul>";
+  content += "<li><a href=/>Home</a>";
+  content += "<li><a href=/param>Params</a><br>";
+  content += "<li><a href=/manual>Manual</a><br>";
+  content += "<li><a href=/config>Config</a><br>";
+//  content += "<li><a href=/upload>Firmware</a><br>";
+  content += "<li><a href=/reboot>Reboot</a><br>";
+  content += "</ul>";
   content += "<p><form method='POST' action='/update' enctype='multipart/form-data'><input type='file' name='update'><input type='submit' value='Update'></form>";
 
   HTTP_printTail(content);

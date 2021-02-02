@@ -38,6 +38,7 @@ void HTTP_handleReboot(void);
 void HTTP_handleDownload(void);
 void HTTP_handleDefault(void);
 void HTTP_handleParam(void);
+void HTTP_handleManual(void);
 void HTTP_handleLogo(void);
 void HTTP_printInput(String &out,const char *label, const char *name, const char *value, int size, int len,bool is_pass=false);
 void HTTP_printHeader(String &out,const char *title, uint16_t refresh=0);

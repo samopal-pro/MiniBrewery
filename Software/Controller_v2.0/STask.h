@@ -1,5 +1,7 @@
 #ifndef STASK_h
 #define STASK_h
+#include <SPIFFS.h>
+#include <FS.h>
 #include "src/SButton.h"
 #include "src/SLed.h"
 #include "src/WiFiManager.h"   
@@ -70,21 +72,32 @@ enum PID_TYPE {
 
 extern uint16_t tunerPID1, tunerPID2,tunerPID5;
 
+#define STAGES_MAX 20
+#define HOP_MAX    5
 struct stageOfBrewing {
+   String NAME;
    uint32_t TIMER; // Длительность варки, мс
    PID_TYPE PID;   // Настройка PID
    float T;        // Температура
    bool OUT0, OUT1, OUT2, OUT3, MOTOR;
-   uint8_t SERVO;  
-   bool CHECKDP;
+//   uint8_t SERVO;  
+   bool CHECKDP;     //Проверять воду
+   bool TIMER_RESET; //Нужно ли сбрасывать таймер
+   bool START_HOP; //Запустить задачу сброса хмеля по таймеру
 };
+extern uint16_t CountStages;
+extern uint16_t CountHop;
 
+struct stageOfHop {
+   uint32_t TIMER; // Тамер
+   uint8_t SERVO;   
+};
 
 // Определение глобальных переменных
 extern float DT0, DT1;
 extern bool DP1;
 extern float TT1;
-extern bool isMQTT;
+extern bool isMQTT,isPause,isAUTO;
 extern PID_TYPE isPID,isPID_save;
 extern float tempPID;
 extern uint32_t timePID;
@@ -97,7 +110,8 @@ extern SOutput Out0,Out1,Out2,Out3,Out4,Heater,Motor,Bizzer;
 extern Adafruit_ILI9341 display;
 extern int servoAngle[];
 extern uint8_t servoPos;
-extern uint32_t ms_pid, ms_start;
+extern uint32_t ms_pid, ms_start,ms_pause;
+extern uint32_t ms_main_tm, ms_phase_tm;
 
 void taskGetSensors( void *pvParameters ); 
 void taskNetwork( void *pvParameters ); 
@@ -123,4 +137,8 @@ void displayIP();
 void semaphorePrint( char *s, bool ln = true);
 uint32_t pidCalcWindow( float t_cur, float t_pid, uint32_t max_window );
 void controlPause();
+void listDir(const char * dirname, uint8_t levels = 0);
+void stopTaskPivo();
+void makeStages();
+void makeStage(String _name, uint32_t _tm, PID_TYPE _pid, float _t, bool _o0, bool o1, bool o2, bool o3, bool _m, bool _dp, bool _reset_tm, bool _start_hop);
 #endif
